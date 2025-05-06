@@ -85,16 +85,21 @@ jobs:
     - name: Build with PyInstaller
       env:
         EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+      shell: bash
       run: |
-        pyinstaller --clean --onefile --name "$EXECUTABLE_NAME" \
-          --add-data "ghrcli:ghrcli" \
-          --hidden-import ghrcli.core.manager \
-          --hidden-import ghrcli.core.operations \
-          --hidden-import ghrcli.utils.cache \
-          --hidden-import ghrcli.utils.config \
-          --hidden-import ghrcli.utils.system \
-          --hidden-import ghrcli.cli.cli \
-          main.py
+        if [[ "${{ matrix.os }}" == "windows"* ]]; then
+          pyinstaller --clean --onefile --name "$EXECUTABLE_NAME" --add-data "ghrcli;ghrcli" --hidden-import ghrcli.core.manager --hidden-import ghrcli.core.operations --hidden-import ghrcli.utils.cache --hidden-import ghrcli.utils.config --hidden-import ghrcli.utils.system --hidden-import ghrcli.cli.cli main.py
+        else
+          pyinstaller --clean --onefile --name "$EXECUTABLE_NAME" \
+            --add-data "ghrcli:ghrcli" \
+            --hidden-import ghrcli.core.manager \
+            --hidden-import ghrcli.core.operations \
+            --hidden-import ghrcli.utils.cache \
+            --hidden-import ghrcli.utils.config \
+            --hidden-import ghrcli.utils.system \
+            --hidden-import ghrcli.cli.cli \
+            main.py
+        fi
         
     - name: Create distribution package
       env:

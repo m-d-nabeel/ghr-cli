@@ -9,7 +9,7 @@ Features:
 - Clean old versions while keeping N most recent
 
 Usage:
-  python tool_manager.py [options]
+  ghr-cli [options]
 
 Options:
   --config FILE    Configuration file (default: toolset.yaml)
