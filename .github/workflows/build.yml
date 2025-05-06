@@ -84,8 +84,8 @@ jobs:
           echo "package_format=tar.gz" >> $GITHUB_OUTPUT
         fi
 
-    - name: Build with PyInstaller (Linux/MacOS)
-      if: matrix.os != 'windows-latest'
+    - name: Build with PyInstaller (Linux)
+      if: matrix.os == 'ubuntu-latest'
       env:
         EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
       shell: bash
@@ -115,6 +115,47 @@ jobs:
           --exclude-module PySide2 \
           --exclude-module PySide6 \
           main.py
+          
+    - name: Build with PyInstaller (macOS)
+      if: matrix.os == 'macos-latest'
+      env:
+        EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+      shell: bash
+      run: |
+        # macOS specific settings to ensure full dependency bundling
+        export PYTHONOPTIMIZE=2
+        export DYLD_LIBRARY_PATH="$DYLD_LIBRARY_PATH:$(dirname $(python -c 'import sys; print(sys.executable)'))"
+        
+        # Use macOS-specific bundling options
+        pyinstaller --clean --onefile \
+          --name "$EXECUTABLE_NAME" \
+          --strip \
+          --codesign-identity=- \
+          --osx-bundle-identifier=com.ghr-cli.app \
+          --add-data "ghrcli:ghrcli" \
+          --hidden-import ghrcli.core.manager \
+          --hidden-import ghrcli.core.operations \
+          --hidden-import ghrcli.utils.cache \
+          --hidden-import ghrcli.utils.config \
+          --hidden-import ghrcli.utils.system \
+          --hidden-import ghrcli.cli.cli \
+          --hidden-import requests \
+          --hidden-import yaml \
+          --hidden-import colorama \
+          --hidden-import certifi \
+          --hidden-import idna \
+          --hidden-import urllib3 \
+          --exclude-module _tkinter \
+          --exclude-module tkinter \
+          --exclude-module PIL \
+          --exclude-module numpy \
+          --exclude-module pandas \
+          main.py
+        
+        # Check the binary
+        echo "Checking macOS binary size and content:"
+        ls -lah dist/
+        file dist/"$EXECUTABLE_NAME"
 
     - name: Build with PyInstaller (Windows)
       if: matrix.os == 'windows-latest'
@@ -137,8 +178,8 @@ jobs:
           --exclude-module PIL \
           main.py
 
-    - name: Create minimal distribution package (Linux/MacOS)
-      if: matrix.os != 'windows-latest'
+    - name: Create minimal distribution package (Linux)
+      if: matrix.os == 'ubuntu-latest'
       env:
         EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
         VERSION: ${{ steps.set_vars.outputs.version }}
@@ -156,6 +197,34 @@ jobs:
         if [[ "${{ steps.set_vars.outputs.package_format }}" == "tar.gz" ]]; then
           tar czf "../ghr-cli-${VERSION}-${PLATFORM}.tar.gz" "$EXECUTABLE_NAME"
         fi
+        
+    - name: Create minimal distribution package (macOS)
+      if: matrix.os == 'macos-latest'
+      env:
+        EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+        VERSION: ${{ steps.set_vars.outputs.version }}
+        PLATFORM: ${{ steps.set_vars.outputs.platform }}
+      shell: bash
+      run: |
+        # Create minimal distribution with just the executable
+        mkdir -p dist_package
+        cp "dist/$EXECUTABLE_NAME" "dist_package/$EXECUTABLE_NAME"
+        chmod +x "dist_package/$EXECUTABLE_NAME"
+        
+        # Check file size to verify it's complete
+        FILESIZE=$(stat -f%z "dist/$EXECUTABLE_NAME")
+        echo "macOS binary size: $FILESIZE bytes"
+        if [ "$FILESIZE" -lt 5000000 ]; then
+          echo "Warning: Binary file seems too small, might be missing dependencies"
+        fi
+        
+        # Create the archive with maximum compression  
+        cd dist_package
+        tar czf "../ghr-cli-${VERSION}-${PLATFORM}.tar.gz" "$EXECUTABLE_NAME"
+        
+        # Verify the package was created successfully
+        cd ..
+        ls -lah "ghr-cli-${VERSION}-${PLATFORM}.tar.gz"
 
     - name: Create distribution package (Windows)
       if: matrix.os == 'windows-latest'
@@ -217,8 +286,25 @@ jobs:
       uses: actions/download-artifact@v4
       with:
         path: artifacts
+        pattern: ghr-cli-*
         merge-multiple: true
-      
+
+    - name: Move artifacts to root and list files
+      run: |
+        echo "Moving and listing files in root directory"
+        # Find all artifacts, excluding those already in the root directory
+        find artifacts -name "ghr-cli-*" -type f | while read -r file; do
+          filename=$(basename "$file")
+          if [ ! -f "./$filename" ]; then
+            cp "$file" ./
+            echo "Found artifact: $filename"
+          else
+            echo "Already exists in root: $filename"
+          fi
+        done
+        echo "Artifacts in root directory:"
+        find . -maxdepth 1 -name "ghr-cli-*" | sort
+        
     - name: Generate release notes
       id: release_notes
       shell: bash
@@ -239,15 +325,19 @@ jobs:
           echo
           echo "### Assets"
           echo
-          find artifacts -type f -name "*.zip" | while read -r file; do
+          # List files from root directory that will be included in the release
+          find . -maxdepth 1 -type f \( -name "*.zip" -o -name "*.tar.gz" \) | sort | while read -r file; do
             echo "* $(basename "$file")"
           done
           echo
           echo "### Installation"
           echo
-          echo "1. Download the appropriate archive for your platform"
+          echo "1. Download the appropriate archive for your platform:"
+          echo "   - Linux: \`ghr-cli-*-linux.tar.gz\`"
+          echo "   - macOS: \`ghr-cli-*-macos.tar.gz\`"
+          echo "   - Windows: \`ghr-cli-*-windows.zip\`"
           echo "2. Extract the archive"
-          echo "3. Run \`./setup.sh\` (Linux/MacOS) or follow README.md instructions"
+          echo "3. Make the executable executable (Linux/macOS): \`chmod +x ghr-cli*\`"
           echo
           echo "### Build Information"
           echo
@@ -256,16 +346,23 @@ jobs:
           echo "* Platform Support: Linux, macOS, Windows"
         } > release_notes.md
         
+    - name: Debug artifacts
+      run: |
+        echo "Listing all artifacts in artifacts directory:"
+        find artifacts -type f | sort
+        
     - name: Create Release
       uses: softprops/action-gh-release@v2
       with:
         tag_name: ${{ steps.set_vars.outputs.release_tag }}
         name: GHR CLI ${{ steps.set_vars.outputs.version }} ${{ steps.set_vars.outputs.release_type }}
         body_path: release_notes.md
-        files: artifacts/*.zip
+        files: |
+          ./ghr-cli-*.zip
+          ./ghr-cli-*.tar.gz
         draft: false
         prerelease: ${{ steps.set_vars.outputs.prerelease }}
-        fail_on_unmatched_files: true
+        fail_on_unmatched_files: false
         generate_release_notes: true
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

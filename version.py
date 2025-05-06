@@ -2,7 +2,7 @@
 
 """Version information for GHR CLI."""
 
-__version__ = "0.1.0-alpha"
+__version__ = "0.1.1-alpha"
 __author__ = "GHR CLI Team"
 __author_email__ = "asharnabeel137@gmail.com"
 __license__ = "MIT"
