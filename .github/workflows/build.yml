@@ -50,7 +50,7 @@ jobs:
         python -m pip install --upgrade pip
         pip install -r requirements.txt
         pip install pyinstaller
-        
+
     - name: Set build variables
       id: set_vars
       shell: bash
@@ -70,91 +70,110 @@ jobs:
         echo "release_type=${RELEASE_TYPE}" >> $GITHUB_OUTPUT
         echo "build_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
         
-        # Define OS-specific executable name
         if [[ "${{ matrix.os }}" == windows* ]]; then
           echo "executable_name=ghr-cli.exe" >> $GITHUB_OUTPUT
           echo "platform=windows" >> $GITHUB_OUTPUT
+          echo "package_format=zip" >> $GITHUB_OUTPUT
         elif [[ "${{ matrix.os }}" == macos* ]]; then
           echo "executable_name=ghr-cli-mac" >> $GITHUB_OUTPUT
           echo "platform=macos" >> $GITHUB_OUTPUT
+          echo "package_format=tar.gz" >> $GITHUB_OUTPUT
         else
           echo "executable_name=ghr-cli-linux" >> $GITHUB_OUTPUT
           echo "platform=linux" >> $GITHUB_OUTPUT
+          echo "package_format=tar.gz" >> $GITHUB_OUTPUT
         fi
-      
-    - name: Build with PyInstaller
+
+    - name: Build with PyInstaller (Linux/MacOS)
+      if: matrix.os != 'windows-latest'
       env:
         EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
       shell: bash
       run: |
-        if [[ "${{ matrix.os }}" == "windows"* ]]; then
-          pyinstaller --clean --onefile --name "$EXECUTABLE_NAME" --add-data "ghrcli;ghrcli" --hidden-import ghrcli.core.manager --hidden-import ghrcli.core.operations --hidden-import ghrcli.utils.cache --hidden-import ghrcli.utils.config --hidden-import ghrcli.utils.system --hidden-import ghrcli.cli.cli main.py
-        else
-          pyinstaller --clean --onefile --name "$EXECUTABLE_NAME" \
-            --add-data "ghrcli:ghrcli" \
-            --hidden-import ghrcli.core.manager \
-            --hidden-import ghrcli.core.operations \
-            --hidden-import ghrcli.utils.cache \
-            --hidden-import ghrcli.utils.config \
-            --hidden-import ghrcli.utils.system \
-            --hidden-import ghrcli.cli.cli \
-            main.py
-        fi
-        
-    - name: Create distribution package
+        # Strip debug symbols and optimize for size
+        export PYTHONOPTIMIZE=2
+        pyinstaller --clean --onefile \
+          --name "$EXECUTABLE_NAME" \
+          --strip \
+          --noupx \
+          --add-data "ghrcli:ghrcli" \
+          --hidden-import ghrcli.core.manager \
+          --hidden-import ghrcli.core.operations \
+          --hidden-import ghrcli.utils.cache \
+          --hidden-import ghrcli.utils.config \
+          --hidden-import ghrcli.utils.system \
+          --hidden-import ghrcli.cli.cli \
+          --exclude-module _tkinter \
+          --exclude-module tkinter \
+          --exclude-module Tkinter \
+          --exclude-module PIL \
+          --exclude-module numpy \
+          --exclude-module pandas \
+          --exclude-module matplotlib \
+          --exclude-module PyQt5 \
+          --exclude-module PyQt6 \
+          --exclude-module PySide2 \
+          --exclude-module PySide6 \
+          main.py
+
+    - name: Build with PyInstaller (Windows)
+      if: matrix.os == 'windows-latest'
+      env:
+        EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+      shell: bash
+      run: |
+        export PYTHONOPTIMIZE=2
+        pyinstaller --clean --onefile \
+          --name "$EXECUTABLE_NAME" \
+          --add-data "ghrcli;ghrcli" \
+          --hidden-import ghrcli.core.manager \
+          --hidden-import ghrcli.core.operations \
+          --hidden-import ghrcli.utils.cache \
+          --hidden-import ghrcli.utils.config \
+          --hidden-import ghrcli.utils.system \
+          --hidden-import ghrcli.cli.cli \
+          --exclude-module _tkinter \
+          --exclude-module tkinter \
+          --exclude-module PIL \
+          main.py
+
+    - name: Create minimal distribution package (Linux/MacOS)
+      if: matrix.os != 'windows-latest'
       env:
         EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
         VERSION: ${{ steps.set_vars.outputs.version }}
-        BUILD_DATE: ${{ steps.set_vars.outputs.build_date }}
         PLATFORM: ${{ steps.set_vars.outputs.platform }}
-        RELEASE_TYPE: ${{ steps.set_vars.outputs.release_type }}
       shell: bash
       run: |
-        mkdir -p dist_package/bin
-        cp "dist/$EXECUTABLE_NAME" dist_package/bin/
-        cp README.md LICENSE toolset.example.yaml dist_package/ || true
+        # Create minimal distribution with just the executable
+        mkdir -p dist_package
+        strip "dist/$EXECUTABLE_NAME" || true
+        cp "dist/$EXECUTABLE_NAME" "dist_package/$EXECUTABLE_NAME"
+        chmod +x "dist_package/$EXECUTABLE_NAME"
         
-        if [[ "${{ matrix.os }}" != "windows"* ]]; then
-          cd dist_package
-          ln -sf "bin/$EXECUTABLE_NAME" .
-          cd ..
+        # Create the archive with maximum compression
+        cd dist_package
+        if [[ "${{ steps.set_vars.outputs.package_format }}" == "tar.gz" ]]; then
+          tar czf "../ghr-cli-${VERSION}-${PLATFORM}.tar.gz" "$EXECUTABLE_NAME"
         fi
-        
-        # Create version info
-        cat > dist_package/version.txt << EOF
-        GHR CLI ${VERSION}
-        Build date: ${BUILD_DATE}
-        Platform: ${PLATFORM}
-        Release type: ${RELEASE_TYPE}
-        Commit: ${{ github.sha }}
-        EOF
-        
-        # Copy and make scripts executable
-        if [[ "${{ matrix.os }}" != "windows"* ]]; then
-          cp setup.sh install.sh dist_package/ || true
-          chmod +x dist_package/*.sh dist_package/bin/* || true
-        fi
-        
-    - name: Create archive
+
+    - name: Create distribution package (Windows)
+      if: matrix.os == 'windows-latest'
       env:
         EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
         VERSION: ${{ steps.set_vars.outputs.version }}
         PLATFORM: ${{ steps.set_vars.outputs.platform }}
       shell: bash
       run: |
-        ARCHIVE_NAME="ghr-cli-${VERSION}-${PLATFORM}"
-        if [[ "${{ matrix.os }}" == "windows"* ]]; then
-          7z a -tzip "${ARCHIVE_NAME}.zip" ./dist_package/*
-        else
-          cd dist_package
-          zip -r "../${ARCHIVE_NAME}.zip" ./*
-        fi
+        mkdir -p dist_package
+        cp "dist/$EXECUTABLE_NAME" "dist_package/$EXECUTABLE_NAME"
+        7z a -tzip -mx=9 "ghr-cli-${VERSION}-${PLATFORM}.zip" "./dist_package/$EXECUTABLE_NAME"
         
     - name: Upload build artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ghr-cli-${{ steps.set_vars.outputs.platform }}
-        path: ghr-cli-${{ steps.set_vars.outputs.version }}-${{ steps.set_vars.outputs.platform }}.zip
+        path: ghr-cli-${{ steps.set_vars.outputs.version }}-${{ steps.set_vars.outputs.platform }}.${{ steps.set_vars.outputs.package_format }}
         compression-level: 9
         retention-days: 5
         
