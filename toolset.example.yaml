@@ -1,0 +1,13 @@
+options:
+  auto_cleanup: false
+  cache_enabled: true
+  cache_expiry: 3600
+  keep_versions: 2
+tools:
+- repo: jesseduffield/lazydocker
+  version: 0.24.1
+- repo: jesseduffield/lazygit
+  version: 0.48.0
+- repo: sxyazi/yazi
+  version: 25.4.8
+- repo: neovim/neovim

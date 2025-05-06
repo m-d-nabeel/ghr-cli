@@ -1,0 +1,247 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+    inputs:
+      release_type:
+        description: 'Release type (alpha, beta, release)'
+        required: true
+        default: 'alpha'
+        type: choice
+        options:
+          - alpha
+          - beta
+          - release
+
+permissions:
+  contents: write
+  pull-requests: read
+
+jobs:
+  build:
+    name: Build GHR CLI
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.12']
+
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+    
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+        cache: 'pip'
+        cache-dependency-path: 'requirements.txt'
+        
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+        pip install pyinstaller
+        
+    - name: Set build variables
+      id: set_vars
+      shell: bash
+      run: |
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+          RELEASE_TYPE="release"
+        elif [[ "${{ github.event.inputs.release_type }}" != "" ]]; then
+          VERSION=$(python -c "import version; print(version.__version__)")
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+        else
+          VERSION=$(python -c "import version; print(version.__version__)")
+          RELEASE_TYPE="alpha"
+        fi
+        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "release_type=${RELEASE_TYPE}" >> $GITHUB_OUTPUT
+        echo "build_date=$(date +'%Y-%m-%d')" >> $GITHUB_OUTPUT
+        
+        # Define OS-specific executable name
+        if [[ "${{ matrix.os }}" == windows* ]]; then
+          echo "executable_name=ghr-cli.exe" >> $GITHUB_OUTPUT
+          echo "platform=windows" >> $GITHUB_OUTPUT
+        elif [[ "${{ matrix.os }}" == macos* ]]; then
+          echo "executable_name=ghr-cli-mac" >> $GITHUB_OUTPUT
+          echo "platform=macos" >> $GITHUB_OUTPUT
+        else
+          echo "executable_name=ghr-cli-linux" >> $GITHUB_OUTPUT
+          echo "platform=linux" >> $GITHUB_OUTPUT
+        fi
+      
+    - name: Build with PyInstaller
+      env:
+        EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+      run: |
+        pyinstaller --clean --onefile --name "$EXECUTABLE_NAME" \
+          --add-data "ghrcli:ghrcli" \
+          --hidden-import ghrcli.core.manager \
+          --hidden-import ghrcli.core.operations \
+          --hidden-import ghrcli.utils.cache \
+          --hidden-import ghrcli.utils.config \
+          --hidden-import ghrcli.utils.system \
+          --hidden-import ghrcli.cli.cli \
+          main.py
+        
+    - name: Create distribution package
+      env:
+        EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+        VERSION: ${{ steps.set_vars.outputs.version }}
+        BUILD_DATE: ${{ steps.set_vars.outputs.build_date }}
+        PLATFORM: ${{ steps.set_vars.outputs.platform }}
+        RELEASE_TYPE: ${{ steps.set_vars.outputs.release_type }}
+      shell: bash
+      run: |
+        mkdir -p dist_package/bin
+        cp "dist/$EXECUTABLE_NAME" dist_package/bin/
+        cp README.md LICENSE toolset.example.yaml dist_package/ || true
+        
+        if [[ "${{ matrix.os }}" != "windows"* ]]; then
+          cd dist_package
+          ln -sf "bin/$EXECUTABLE_NAME" .
+          cd ..
+        fi
+        
+        # Create version info
+        cat > dist_package/version.txt << EOF
+        GHR CLI ${VERSION}
+        Build date: ${BUILD_DATE}
+        Platform: ${PLATFORM}
+        Release type: ${RELEASE_TYPE}
+        Commit: ${{ github.sha }}
+        EOF
+        
+        # Copy and make scripts executable
+        if [[ "${{ matrix.os }}" != "windows"* ]]; then
+          cp setup.sh install.sh dist_package/ || true
+          chmod +x dist_package/*.sh dist_package/bin/* || true
+        fi
+        
+    - name: Create archive
+      env:
+        EXECUTABLE_NAME: ${{ steps.set_vars.outputs.executable_name }}
+        VERSION: ${{ steps.set_vars.outputs.version }}
+        PLATFORM: ${{ steps.set_vars.outputs.platform }}
+      shell: bash
+      run: |
+        ARCHIVE_NAME="ghr-cli-${VERSION}-${PLATFORM}"
+        if [[ "${{ matrix.os }}" == "windows"* ]]; then
+          7z a -tzip "${ARCHIVE_NAME}.zip" ./dist_package/*
+        else
+          cd dist_package
+          zip -r "../${ARCHIVE_NAME}.zip" ./*
+        fi
+        
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: ghr-cli-${{ steps.set_vars.outputs.platform }}
+        path: ghr-cli-${{ steps.set_vars.outputs.version }}-${{ steps.set_vars.outputs.platform }}.zip
+        compression-level: 9
+        retention-days: 5
+        
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set release variables
+      id: set_vars
+      shell: bash
+      run: |
+        if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+          RELEASE_TYPE="release"
+          PRERELEASE="false"
+        elif [[ "${{ github.event.inputs.release_type }}" != "" ]]; then
+          VERSION=$(python -c "import version; print(version.__version__)")
+          RELEASE_TYPE="${{ github.event.inputs.release_type }}"
+          if [[ "$RELEASE_TYPE" == "alpha" || "$RELEASE_TYPE" == "beta" ]]; then
+            PRERELEASE="true"
+          else
+            PRERELEASE="false"
+          fi
+        else
+          VERSION=$(python -c "import version; print(version.__version__)")
+          RELEASE_TYPE="alpha"
+          PRERELEASE="true"
+        fi
+        
+        echo "version=${VERSION}" >> $GITHUB_OUTPUT
+        echo "release_type=${RELEASE_TYPE}" >> $GITHUB_OUTPUT
+        echo "prerelease=${PRERELEASE}" >> $GITHUB_OUTPUT
+        echo "release_tag=v${VERSION}-${RELEASE_TYPE}.$(date +'%Y%m%d')" >> $GITHUB_OUTPUT
+    
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: artifacts
+        merge-multiple: true
+      
+    - name: Generate release notes
+      id: release_notes
+      shell: bash
+      run: |
+        echo "Generating release notes..."
+        {
+          echo "GHR CLI ${{ steps.set_vars.outputs.version }} (${{ steps.set_vars.outputs.release_type }})"
+          echo
+          echo "This is an automated ${{ steps.set_vars.outputs.release_type }} build of the GHR CLI utility."
+          echo
+          echo "### What's Changed"
+          echo
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            git log --pretty=format:"* %s" $(git describe --tags --abbrev=0 HEAD^)..HEAD || true
+          else
+            git log --pretty=format:"* %s" -n 10 || true
+          fi
+          echo
+          echo "### Assets"
+          echo
+          find artifacts -type f -name "*.zip" | while read -r file; do
+            echo "* $(basename "$file")"
+          done
+          echo
+          echo "### Installation"
+          echo
+          echo "1. Download the appropriate archive for your platform"
+          echo "2. Extract the archive"
+          echo "3. Run \`./setup.sh\` (Linux/MacOS) or follow README.md instructions"
+          echo
+          echo "### Build Information"
+          echo
+          echo "* Build Date: $(date +'%Y-%m-%d')"
+          echo "* Commit: ${{ github.sha }}"
+          echo "* Platform Support: Linux, macOS, Windows"
+        } > release_notes.md
+        
+    - name: Create Release
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.set_vars.outputs.release_tag }}
+        name: GHR CLI ${{ steps.set_vars.outputs.version }} ${{ steps.set_vars.outputs.release_type }}
+        body_path: release_notes.md
+        files: artifacts/*.zip
+        draft: false
+        prerelease: ${{ steps.set_vars.outputs.prerelease }}
+        fail_on_unmatched_files: true
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
